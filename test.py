@@ -229,17 +229,12 @@ if __name__ == "__main__":
 
 
 	argspar = parser.parse_args()
-	# Normalize noises ot [0, 1]
-	argspar.val_bias_noiseL /= 255.
-	argspar.val_row_noiseL /= 255.
-	argspar.val_col_noiseL /= 255.
-	argspar.val_noiseL /= 255.
-	argspar.val_line_noiseL /= 255.
-
-
-
-	# use CUDA?
-	argspar.cuda = not argspar.no_gpu and torch.cuda.is_available()
+	# Normalize noises to [0, 1] for 16-bit inputs
+	argspar.val_bias_noiseL /= 65535.
+	argspar.val_row_noiseL /= 65535.
+	argspar.val_col_noiseL /= 65535.
+	argspar.val_noiseL /= 65535.
+	argspar.val_line_noiseL /= 65535.
 
 	print("\n### Testing FastDVDnet model ###")
 	print("> Parameters:")
@@ -252,11 +247,11 @@ if __name__ == "__main__":
 	else:
 		for i in range(8):
 			print('noise level {}'.format(i+1))
-			argspar.val_bias_noiseL = argspar.val_bias_noiseL_class[i]/255.
-			argspar.val_row_noiseL = argspar.val_row_noiseL_class[i]/255.
-			argspar.val_col_noiseL = argspar.val_col_noiseL_class[i]/255.
-			argspar.val_noiseL = argspar.val_noiseL_class[i]/255.
-			argspar.val_line_noiseL = argspar.val_line_noiseL_class[i]/255.
+			argspar.val_bias_noiseL = argspar.val_bias_noiseL_class[i]/65535.
+			argspar.val_row_noiseL = argspar.val_row_noiseL_class[i]/65535.
+			argspar.val_col_noiseL = argspar.val_col_noiseL_class[i]/65535.
+			argspar.val_noiseL = argspar.val_noiseL_class[i]/65535.
+			argspar.val_line_noiseL = argspar.val_line_noiseL_class[i]/65535.
 			test_MDIVDnet(**vars(argspar))
 
 

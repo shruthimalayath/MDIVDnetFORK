@@ -22,7 +22,7 @@ import scipy.linalg
 
 IMAGETYPES = ('*.bmp', '*.png', '*.jpg', '*.jpeg', '*.tif') # Supported image types
 
-def normalize_augment(datain):
+def normalize_augment(datain, max_val=65535.):
 	def transform(sample):
 		do_nothing = lambda x: x
 		do_nothing.__name__ = 'do_nothing'
@@ -41,11 +41,11 @@ def normalize_augment(datain):
 		rot270_flipud = lambda x: torch.flip(torch.rot90(x, k=3, dims=[2, 3]), dims=[2])
 		rot270_flipud.__name__ = 'rot270_flipud'
 		add_csnt = lambda x: x + torch.normal(mean=torch.zeros(x.size()[0], 1, 1, 1), \
-											  std=(5/255.)).expand_as(x).to(x.device)
+							  std=(5/65535.)).expand_as(x).to(x.device)
 		add_csnt.__name__ = 'add_csnt'
 
 		aug_list = [do_nothing, flipud, rot90, rot90_flipud, \
-					rot180, rot180_flipud, rot270, rot270_flipud, add_csnt]
+				rot180, rot180_flipud, rot270, rot270_flipud, add_csnt]
 		w_aug = [32, 12, 12, 12, 12, 12, 12, 12, 12]
 		transf = choices(aug_list, w_aug)
 
@@ -53,11 +53,60 @@ def normalize_augment(datain):
 
 	img_train = datain
 	img_train = img_train.view(img_train.size()[0], -1,
-							   img_train.size()[-2], img_train.size()[-1]) / 255.
+					   img_train.size()[-2], img_train.size()[-1]) / max_val
 
 	img_train = transform(img_train)
 
 	return img_train
+
+#Normalization & augmentation for pairs: ensures same transformations are applied to both
+def normalize_augment_pair(noisy_seq, clean_seq, ctrl_fr_idx):
+    """
+    Args:
+        noisy_seq: [N, num_frames, C, H, W]
+        clean_seq: [N, num_frames, C, H, W]
+
+    Returns:
+        imgn_train: [N, num_frames*C, H, W]
+        gt_train:   [N, 3, H, W]
+    """
+
+    def get_transform():
+        aug_list = [
+            lambda x: x,
+            lambda x: torch.flip(x, dims=[2]),
+            lambda x: torch.rot90(x, k=1, dims=[2, 3]),
+            lambda x: torch.flip(torch.rot90(x, k=1, dims=[2, 3]), dims=[2]),
+            lambda x: torch.rot90(x, k=2, dims=[2, 3]),
+            lambda x: torch.flip(torch.rot90(x, k=2, dims=[2, 3]), dims=[2]),
+            lambda x: torch.rot90(x, k=3, dims=[2, 3]),
+            lambda x: torch.flip(torch.rot90(x, k=3, dims=[2, 3]), dims=[2]),
+        ]
+
+        w_aug = [32, 12, 12, 12, 12, 12, 12, 12]
+        return choices(aug_list, w_aug)[0]
+
+    # normalize both noisy and clean using the same min/max values per sample
+    noisy_seq, clean_seq, minv, maxv = minmax_normalize_pair(noisy_seq, clean_seq)
+
+    noisy_seq = noisy_seq.reshape(noisy_seq.size(0), -1, noisy_seq.size(-2), noisy_seq.size(-1))
+    clean_seq = clean_seq.reshape(clean_seq.size(0), -1, clean_seq.size(-2), clean_seq.size(-1))
+
+    # flatten temporal dimension: issue continguous vs non contiguous tensor
+    #noisy_seq = noisy_seq.view(noisy_seq.size(0),-1,noisy_seq.size(-2),noisy_seq.size(-1))
+    #clean_seq = clean_seq.view(clean_seq.size(0),-1,clean_seq.size(-2),clean_seq.size(-1))
+
+    # choose one augmentation
+    transf = get_transform()
+
+    # apply same augmentation to both
+    noisy_seq = transf(noisy_seq)
+    clean_seq = transf(clean_seq)
+
+    # extract clean center frame
+    gt_train = clean_seq[ :,3*ctrl_fr_idx:3*ctrl_fr_idx+3,:,:]
+
+    return noisy_seq, gt_train
 
 def init_logging(argdict):
 	TIMESTAMP = "{0:%Y-%m-%dT%H-%M-%S/}".format(datetime.now())
@@ -109,10 +158,27 @@ def open_sequence(seq_dir, gray_mode, expand_if_needed=False, max_num_fr=100, di
 
 def open_image(fpath, gray_mode, expand_if_needed=False, expand_axis0=True, normalize_data=True):
 	if not gray_mode:
-		img = cv2.imread(fpath)
-		img = (cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).transpose(2, 0, 1)
+		img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+		if img is None:
+			raise IOError(f"Could not read image: {fpath}")
+		if img.ndim == 3:
+			img = (cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).transpose(2, 0, 1)
+		elif img.ndim == 2:
+			img = np.stack([img, img, img], axis=0)
+		else:
+			raise ValueError(f"Unsupported image shape {img.shape} for {fpath}")
 	else:
-		img = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
+		img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+		if img is None:
+			raise IOError(f"Could not read image: {fpath}")
+		if img.ndim == 2:
+			img = np.stack([img, img, img], axis=0)
+		elif img.ndim == 3 and img.shape[2] == 1:
+			img = np.repeat(img, 3, axis=2)
+		elif img.ndim == 3 and img.shape[2] == 3:
+			img = img.transpose(2, 0, 1)
+		else:
+			raise ValueError(f"Unsupported image shape {img.shape} for {fpath}")
 
 	if expand_axis0:
 		img = np.expand_dims(img, 0)

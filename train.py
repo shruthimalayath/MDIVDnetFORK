@@ -3,9 +3,11 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import time
 import argparse
 import torch.optim as optim
+import torch.nn as nn
+from torch.utils.data import DataLoader
 from lossfuntion import *
-from dataset import ValDataset
-from dataloaders import train_dali_loader
+from dataset_val import CleanValDataset
+from dataset_paired import CleanThermalDataset
 from utils import close_logger, init_logging, normalize_augment, ADDNOISE_class, loss_calc
 from train_common import resume_training, log_train_psnr, validate_and_log, save_model_checkpoint
 import numpy as np
@@ -28,30 +30,50 @@ def main(**args):
     set_seed(seed)
 
     if args['gpus_num'] == -1:
-        device_ids = range(torch.cuda.device_count())
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            device_ids = list(range(torch.cuda.device_count()))
+        else:
+            device_ids = [-1]
     else:
-        device_ids = range(args['gpus_num'])
-    device = torch.device('cuda' if device_ids[0] >= 0 else 'cpu')
+        device_ids = list(range(args['gpus_num']))
+        if len(device_ids) == 0:
+            device_ids = [-1]
 
-    # Load dataset
-    if args['valset_dir'] != '':
-        print('> Loading datasets ...')
-        dataset_val = ValDataset(valsetdir=args['valset_dir'], num_input_frames=args['framenum_of_val'])
+    device = torch.device('cuda' if device_ids[0] >= 0 else 'cpu')
 
     # define graymode
     GRAYmode = args['graymode']
 
+    # Load validation dataset
+    if args['valset_dir'] != '':
+        print('> Loading validation dataset ...')
+        dataset_val = CleanValDataset(clean_root=args['valset_dir'],
+                                      max_num_fr=args['framenum_of_val'],
+                                      gray_mode=GRAYmode)
+
     print("load train")
-    loader_train = train_dali_loader(batch_size=args['batch_size'],
-                                     file_root=args['trainset_dir'],
-                                     sequence_length=args['temp_patch_size'],
-                                     crop_size=args['patch_size'],
-                                     epoch_size=args['max_number_patches'],
-                                     random_shuffle=True,
-                                     temp_stride=3)
+    if args['train_clean_dir'] != '':
+        train_clean_dir = args['train_clean_dir']
+    else:
+        train_clean_dir = args['trainset_dir']
 
+    train_dataset = CleanThermalDataset(
+        clean_root=train_clean_dir,
+        patch_size=args['patch_size'],
+        temp_patch_size=args['temp_patch_size'],
+        epoch_size=args['max_number_patches'],
+        preload=True,
+        progress=True,
+        gray_mode=GRAYmode)
 
-    print("\t# of training samples: %d\n" % int(args['max_number_patches']))
+    loader_train = DataLoader(train_dataset,
+                              batch_size=args['batch_size'],
+                              shuffle=True,
+                              num_workers=4,
+                              pin_memory=True,
+                              drop_last=True)
+
+    print("\t# of training samples: %d\n" % int(len(train_dataset)))
 
     # Init loggers
     writer, logger, TIMESTAMP = init_logging(args)
@@ -69,7 +91,7 @@ def main(**args):
         model = model.to(device)
 
     # Define loss
-    criterion_L2 = L2_LOSS().cuda()
+    criterion_L2 = L2_LOSS().to(device)
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args['lr'])
@@ -80,6 +102,8 @@ def main(**args):
 
     # Resume training or start anew
     start_epoch, training_params = resume_training(args, model, optimizer)
+
+    num_minibatches = int(args['max_number_patches'] // args['batch_size'])
 
     # Training
     start_time = time.time()
@@ -93,13 +117,14 @@ def main(**args):
         for i, data in enumerate(loader_train, 0):
             model.train()
             optimizer.zero_grad()
-            img_train = normalize_augment(data[0]['data'])
+            clean_seq = data.float()
+            img_train = normalize_augment(clean_seq, max_val=65535.)
             N, FC, H, W = img_train.size()
-            if GRAYmode == True:
+            if GRAYmode:
                 C = 1
             else:
                 C = 3
-            F = int(FC/C)
+            F = int(FC / C)
 
             # add noise
             imgn_train = noise.addnoise(img_train, args, mode='train')
@@ -236,26 +261,28 @@ if __name__ == "__main__":
                         help='path of log files')
     parser.add_argument("--trainset_dir", type=str, default="./data/train_MP4",
                         help='path of trainset')
+    parser.add_argument("--train_clean_dir", type=str, default="",
+                        help='path of clean training set')
     parser.add_argument("--valset_dir", type=str, default="", help='path of validation set')
     argspar = parser.parse_args()
 
     # Normalize noise between [0, 1]
-    argspar.val_noiseL /= 255.
-    argspar.val_line_noiseL /= 255.
-    argspar.val_row_noiseL /= 255.
-    argspar.val_col_noiseL /= 255.
-    argspar.val_bias_noiseL /= 255.
+    argspar.val_noiseL /= 65535.
+    argspar.val_line_noiseL /= 65535.
+    argspar.val_row_noiseL /= 65535.
+    argspar.val_col_noiseL /= 65535.
+    argspar.val_bias_noiseL /= 65535.
 
-    argspar.noise_ival[0] /= 255.
-    argspar.noise_ival[1] /= 255.
-    argspar.noise_line_ival[0] /= 255.
-    argspar.noise_line_ival[1] /= 255.
-    argspar.noise_rowspatial_ival[0] /= 255.
-    argspar.noise_rowspatial_ival[1] /= 255.
-    argspar.noise_colspatial_ival[0] /= 255.
-    argspar.noise_colspatial_ival[1] /= 255.
-    argspar.noise_bias_ival[0] /= 255.
-    argspar.noise_bias_ival[1] /= 255.
+    argspar.noise_ival[0] /= 65535.
+    argspar.noise_ival[1] /= 65535.
+    argspar.noise_line_ival[0] /= 65535.
+    argspar.noise_line_ival[1] /= 65535.
+    argspar.noise_rowspatial_ival[0] /= 65535.
+    argspar.noise_rowspatial_ival[1] /= 65535.
+    argspar.noise_colspatial_ival[0] /= 65535.
+    argspar.noise_colspatial_ival[1] /= 65535.
+    argspar.noise_bias_ival[0] /= 65535.
+    argspar.noise_bias_ival[1] /= 65535.
 
     num_minibatches = int(argspar.max_number_patches // argspar.batch_size)
     if argspar.auto_save_every != 0:
